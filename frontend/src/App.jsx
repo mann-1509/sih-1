@@ -1,13 +1,20 @@
 import React, { useState, useEffect } from 'react';
-import { Header } from './components/ui/Header';
 import { SceneContainer } from './components/3d/SceneContainer';
-import { VisualControlsPanel } from './components/ui/VisualControlsPanel';
-import { AssetDetailsModal } from './components/ui/AssetDetailsModal';
+import { FloatingSearchBar } from './components/ui/FloatingSearchBar';
+import { SlimIconRail } from './components/ui/SlimIconRail';
+import { MapControls } from './components/ui/MapControls';
+import { BottomStatusBar } from './components/ui/BottomStatusBar';
+import { LayersPanel } from './components/ui/LayersPanel';
+import { UndergroundPanel } from './components/ui/UndergroundPanel';
+import { BuildingsPanel } from './components/ui/BuildingsPanel';
+import { MeasurePanel } from './components/ui/MeasurePanel';
+import { InfoPanel } from './components/ui/InfoPanel';
+import { GoogleEarthInfoCard } from './components/ui/GoogleEarthInfoCard';
 import { RegisterAssetModal } from './components/ui/RegisterAssetModal';
 import { ConflictDetectorPanel } from './components/ui/ConflictDetectorPanel';
 import { DashboardView } from './components/ui/DashboardView';
 import { BeforeAfterView } from './components/ui/BeforeAfterView';
-import { fetchAssets, resetSeedApi } from './services/api';
+import { fetchAssets, localToLatLon } from './services/api';
 
 const BASE_LAT = 23.0225;
 const BASE_LON = 72.5714;
@@ -16,26 +23,35 @@ const LON_TO_METERS = 102500.0;
 
 export default function App() {
   const [assets, setAssets] = useState([]);
-  const [activeTab, setActiveTab] = useState('map');
+  const [activePanel, setActivePanel] = useState(null);
 
-  // Selection & 3D Spatial State
   const [selectedAsset, setSelectedAsset] = useState(null);
   const [clickedInfo, setClickedInfo] = useState(null);
 
-  // Viewport Visual Controls
+  const [layerVisibility, setLayerVisibility] = useState({
+    buildings: true,
+    water: true,
+    sewer: true,
+    electrical: true,
+    gas: true,
+    telecom: true
+  });
+
+  const [groundOpacity, setGroundOpacity] = useState(0.85);
   const [undergroundView, setUndergroundView] = useState(true);
   const [showPipeOverlay, setShowPipeOverlay] = useState(true);
-  const [activeMapLevel, setActiveMapLevel] = useState('all'); // 'all' | 'surface' | 'underground'
   const [verticalExaggeration, setVerticalExaggeration] = useState(1.5);
   const [showCrossSection, setShowCrossSection] = useState(false);
 
-  // Conflict State & Explicit Camera Focus Targets
   const [conflictResult, setConflictResult] = useState(null);
-  const [focusPoint, setFocusPoint] = useState({ x: 0, y: 0, z: 0, distance: 45 });
-  const [focusTrigger, setFocusTrigger] = useState(0);
+  const [focusPoint, setFocusPoint] = useState({ x: -30.75, y: 8, z: -22.1, distance: 42 });
+  const [focusTrigger, setFocusTrigger] = useState(1);
+  const [zoomAction, setZoomAction] = useState(null);
+  const [resetNorthTrigger, setResetNorthTrigger] = useState(0);
+  const [is3DMode, setIs3DMode] = useState(true);
+  const [compassHeading, setCompassHeading] = useState(0);
+  const [cameraCoordinates, setCameraCoordinates] = useState({ lat: BASE_LAT, lon: BASE_LON, alt: 65 });
   const [newlyCreatedUlpin, setNewlyCreatedUlpin] = useState(null);
-
-  const [isResetting, setIsResetting] = useState(false);
 
   const loadAssets = async () => {
     try {
@@ -50,29 +66,28 @@ export default function App() {
     loadAssets();
   }, []);
 
-  // Calculate accurate 3D world target and camera distance for any asset
   const computeAssetTarget = (asset, clickData = null) => {
-    let targetX = 0, targetY = 0, targetZ = 0;
-    let distance = 22;
+    let targetX = 0;
+    let targetY = 0;
+    let targetZ = 0;
+    let distance = 24;
 
     if (clickData && clickData.worldX !== undefined) {
       targetX = clickData.worldX;
       targetY = clickData.worldY;
       targetZ = clickData.worldZ;
-      distance = clickData.distance || 18;
+      distance = clickData.distance || 20;
     } else if (clickData && clickData.x !== undefined) {
       targetX = clickData.x;
       targetY = clickData.y * verticalExaggeration;
       targetZ = clickData.z;
-      distance = clickData.distance || 18;
+      distance = clickData.distance || 20;
     } else if (asset.start_x !== undefined) {
-      // Linear pipeline asset
       targetX = (asset.start_x + asset.end_x) / 2;
       targetY = ((asset.start_y + asset.end_y) / 2) * verticalExaggeration;
       targetZ = (asset.start_z + asset.end_z) / 2;
-      distance = 20;
+      distance = 22;
     } else if (asset.asset_type === 'floor') {
-      // Individual floor unit
       const lon = asset.longitude || BASE_LON;
       const lat = asset.latitude || BASE_LAT;
       targetX = (lon - BASE_LON) * LON_TO_METERS;
@@ -80,20 +95,18 @@ export default function App() {
       const flElev = asset.elevation || 0;
       const flHeight = asset.height || 3.8;
       targetY = (flElev + flHeight / 2) * verticalExaggeration;
-      distance = 18;
+      distance = 20;
     } else if (asset.latitude !== undefined) {
-      // Multi-story building / property
       targetX = (asset.longitude - BASE_LON) * LON_TO_METERS;
       targetZ = -(asset.latitude - BASE_LAT) * LAT_TO_METERS;
       const bldHeight = asset.height || 16;
       targetY = (bldHeight / 2) * verticalExaggeration;
-      distance = Math.max(28, bldHeight * 1.5);
+      distance = Math.max(30, bldHeight * 1.5);
     }
 
     return { x: targetX, y: targetY, z: targetZ, distance };
   };
 
-  // Handle asset selection AND calculate smooth camera focus
   const handleSelectAsset = (asset, clickData = null) => {
     setSelectedAsset(asset);
     setClickedInfo(clickData);
@@ -101,36 +114,73 @@ export default function App() {
 
     const target = computeAssetTarget(asset, clickData);
     setFocusPoint(target);
-    setFocusTrigger(prev => prev + 1);
+    setFocusTrigger((prev) => prev + 1);
   };
 
-  // Explicit Focus Action
-  const handleFocusAsset = (asset, clickData = null) => {
-    const target = computeAssetTarget(asset, clickData);
-    setFocusPoint(target);
-    setFocusTrigger(prev => prev + 1);
+  const handleTogglePanel = (panelId) => {
+    setActivePanel((prev) => (prev === panelId ? null : panelId));
   };
 
-  // Search Handler
-  const handleSearchUlpin = (query) => {
+  const handleToggleLayer = (layerId) => {
+    setLayerVisibility((prev) => ({
+      ...prev,
+      [layerId]: !prev[layerId]
+    }));
+  };
+
+  const handleSearchSubmit = (query) => {
     const found = assets.find(
-      (a) => a.ulpin.toLowerCase() === query.toLowerCase() || a.ulpin.toLowerCase().includes(query.toLowerCase())
+      (a) =>
+        a.ulpin.toLowerCase() === query.toLowerCase() ||
+        a.ulpin.toLowerCase().includes(query.toLowerCase()) ||
+        a.name?.toLowerCase().includes(query.toLowerCase()) ||
+        ((query.toLowerCase().includes('pdeu') || query.toLowerCase().includes('hostel')) &&
+          a.ulpin === '3D-ULPIN-GJ-AHM-BLD-001')
     );
 
     if (found) {
-      setActiveTab('map');
       handleSelectAsset(found);
     } else {
-      alert(`No cadastral record found matching ULPIN: "${query}"`);
+      alert(`No spatial record found matching: "${query}"`);
     }
   };
 
-  // Live Asset Registration Sync
+  const handleResetLocation = () => {
+    setFocusPoint({ x: -30.75, y: 8, z: -22.1, distance: 42 });
+    setFocusTrigger((prev) => prev + 1);
+  };
+
+  const handleZoomIn = () => {
+    setZoomAction({ direction: 'in', timestamp: Date.now() });
+  };
+
+  const handleZoomOut = () => {
+    setZoomAction({ direction: 'out', timestamp: Date.now() });
+  };
+
+  const handleResetNorth = () => {
+    setResetNorthTrigger((prev) => prev + 1);
+  };
+
+  const handleToggle2D3D = () => {
+    setIs3DMode((prev) => !prev);
+  };
+
+  const handleCameraStatsChange = ({ heading, eyeAltitude, x, z }) => {
+    setCompassHeading(heading);
+    const coords = localToLatLon(x, z);
+    setCameraCoordinates({
+      lat: coords.lat,
+      lon: coords.lon,
+      alt: eyeAltitude
+    });
+  };
+
   const handleAssetRegistered = (newAsset) => {
     loadAssets();
     setConflictResult(null);
     setNewlyCreatedUlpin(newAsset.ulpin);
-    setActiveTab('map');
+    setActivePanel(null);
     handleSelectAsset(newAsset);
 
     if (newAsset.category === 'infrastructure') {
@@ -140,29 +190,19 @@ export default function App() {
     setTimeout(() => setNewlyCreatedUlpin(null), 3500);
   };
 
-  // Explicit Zoom/Focus to Conflict Site
   const handleFocusConflict = (coords) => {
     setFocusPoint({
       x: coords.x,
       y: coords.y * verticalExaggeration,
       z: coords.z,
-      distance: 16
+      distance: 18
     });
-    setFocusTrigger(prev => prev + 1);
+    setFocusTrigger((prev) => prev + 1);
     setUndergroundView(true);
   };
 
-  // View Conflict from Registration Modal
-  const handleViewConflictFromRegistration = (conflictRes, coords) => {
-    setConflictResult(conflictRes);
-    if (coords) {
-      handleFocusConflict(coords);
-    }
-  };
-
-  // Inspect conflict directly from 3D tag or conflicted entity
   const handleSelectConflict = (conflictItem) => {
-    setActiveTab('conflict');
+    setActivePanel('conflict');
     if (conflictItem && conflictItem.conflict_x !== undefined) {
       handleFocusConflict({
         x: conflictItem.conflict_x,
@@ -172,130 +212,178 @@ export default function App() {
     }
   };
 
-  // Reset Demo Data
-  const handleResetSeed = async () => {
-    setIsResetting(true);
-    try {
-      await resetSeedApi();
-      await loadAssets();
-      setSelectedAsset(null);
-      setClickedInfo(null);
-      setConflictResult(null);
-      setFocusPoint({ x: 0, y: 0, z: 0, distance: 45 });
-      setFocusTrigger(prev => prev + 1);
-    } catch (err) {
-      console.error(err);
-    } finally {
-      setIsResetting(false);
-    }
-  };
-
-  const isMapActive = activeTab === 'map' || activeTab === 'register' || activeTab === 'conflict';
-
   return (
-    <div className="h-screen w-screen overflow-hidden bg-[#090B0E] text-slate-100 flex flex-col antialiased select-none">
-      {/* Top Application Bar */}
-      <Header
-        onSearch={handleSearchUlpin}
-        onResetSeed={handleResetSeed}
-        isResetting={isResetting}
-        activeTab={activeTab}
-        setActiveTab={setActiveTab}
+    <div className="w-screen h-screen overflow-hidden bg-[#0b0d0e] text-[#202124] relative isolate select-none">
+      <SceneContainer
+        assets={assets}
+        selectedAsset={selectedAsset}
+        onSelectAsset={handleSelectAsset}
+        layerVisibility={layerVisibility}
+        groundOpacity={groundOpacity}
+        undergroundView={undergroundView}
+        showPipeOverlay={showPipeOverlay}
+        verticalExaggeration={verticalExaggeration}
+        showCrossSection={showCrossSection}
+        conflictResult={conflictResult}
+        onSelectConflict={handleSelectConflict}
+        focusPoint={focusPoint}
+        focusTrigger={focusTrigger}
+        zoomAction={zoomAction}
+        resetNorthTrigger={resetNorthTrigger}
+        is3DMode={is3DMode}
+        onCameraStatsChange={handleCameraStatsChange}
+        newlyCreatedUlpin={newlyCreatedUlpin}
+        isMapActive={true}
       />
 
-      {/* Main Workspace Area */}
-      <main className="flex-1 min-h-0 w-full max-w-[1920px] mx-auto p-2 sm:p-2.5 flex flex-col overflow-hidden relative">
-        {isMapActive && (
-          <div className="w-full h-full flex-1 min-h-0 relative rounded-xl overflow-hidden border border-white/[0.08] shadow-[0_25px_60px_-15px_rgba(0,0,0,0.8)] bg-[#090B0E] isolate z-10 flex flex-col">
-            {/* Viewport Context Chip */}
-            <div className="absolute top-3 left-3 z-20 pointer-events-none hidden sm:flex items-center gap-2 px-3 py-1 rounded-lg cadastre-panel text-[11px] text-slate-300 shadow-md">
-              <span className="relative flex h-2 w-2">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
-              </span>
-              <span className="font-semibold text-slate-200">3D Volumetric Cadastre</span>
-              <span className="text-slate-400 font-mono">· Ahmedabad Sector 3</span>
-            </div>
+      <FloatingSearchBar
+        assets={assets}
+        onSelectResult={handleSelectAsset}
+        onSearchSubmit={handleSearchSubmit}
+      />
 
-            {/* 3D WebGL Canvas */}
-            <SceneContainer
-              assets={assets}
-              selectedAsset={selectedAsset}
-              onSelectAsset={handleSelectAsset}
-              undergroundView={undergroundView}
-              showPipeOverlay={showPipeOverlay}
-              verticalExaggeration={verticalExaggeration}
-              showCrossSection={showCrossSection}
-              conflictResult={conflictResult}
-              onSelectConflict={handleSelectConflict}
-              focusPoint={focusPoint}
-              focusTrigger={focusTrigger}
-              newlyCreatedUlpin={newlyCreatedUlpin}
-              isMapActive={isMapActive}
-              activeTab={activeTab}
-            />
+      <SlimIconRail
+        activePanel={activePanel}
+        onTogglePanel={handleTogglePanel}
+      />
 
-            {/* Floating Map Controls HUD */}
-            <VisualControlsPanel
-              undergroundView={undergroundView}
-              setUndergroundView={setUndergroundView}
-              showPipeOverlay={showPipeOverlay}
-              setShowPipeOverlay={setShowPipeOverlay}
-              activeMapLevel={activeMapLevel}
-              setActiveMapLevel={setActiveMapLevel}
-              verticalExaggeration={verticalExaggeration}
-              setVerticalExaggeration={setVerticalExaggeration}
-              showCrossSection={showCrossSection}
-              setShowCrossSection={setShowCrossSection}
-              onResetCamera={() => {
-                setFocusPoint({ x: 0, y: 0, z: 0, distance: 45 });
-                setFocusTrigger(prev => prev + 1);
-              }}
-            />
+      {activePanel === 'layers' && (
+        <LayersPanel
+          layerVisibility={layerVisibility}
+          onToggleLayer={handleToggleLayer}
+          groundOpacity={groundOpacity}
+          onChangeGroundOpacity={setGroundOpacity}
+          undergroundView={undergroundView}
+          onToggleUndergroundView={() => setUndergroundView(!undergroundView)}
+          onClose={() => setActivePanel(null)}
+        />
+      )}
 
-            {/* Selected Asset Details Drawer */}
-            {selectedAsset && activeTab === 'map' && (
-              <AssetDetailsModal
-                asset={selectedAsset}
-                clickedInfo={clickedInfo}
-                onClose={() => {
-                  setSelectedAsset(null);
-                  setClickedInfo(null);
-                }}
-                onFocusAsset={handleFocusAsset}
-              />
-            )}
+      {activePanel === 'underground' && (
+        <UndergroundPanel
+          undergroundView={undergroundView}
+          setUndergroundView={setUndergroundView}
+          showPipeOverlay={showPipeOverlay}
+          setShowPipeOverlay={setShowPipeOverlay}
+          verticalExaggeration={verticalExaggeration}
+          setVerticalExaggeration={setVerticalExaggeration}
+          showCrossSection={showCrossSection}
+          setShowCrossSection={setShowCrossSection}
+          onClose={() => setActivePanel(null)}
+        />
+      )}
 
-            {/* Register Asset Panel Overlay */}
-            {activeTab === 'register' && (
-              <RegisterAssetModal
-                onAssetRegistered={handleAssetRegistered}
-                onClose={() => {
-                  setActiveTab('map');
-                  setConflictResult(null);
-                }}
-                onViewConflictIn3D={handleViewConflictFromRegistration}
-              />
-            )}
+      {activePanel === 'buildings' && (
+        <BuildingsPanel
+          assets={assets}
+          selectedAsset={selectedAsset}
+          onSelectAsset={handleSelectAsset}
+          onClose={() => setActivePanel(null)}
+        />
+      )}
 
-            {/* Conflict Analysis Panel Overlay */}
-            {activeTab === 'conflict' && (
-              <ConflictDetectorPanel
-                onConflictChecked={(res) => setConflictResult(res)}
-                onZoomToConflict={handleFocusConflict}
-                onClose={() => {
-                  setActiveTab('map');
-                  setConflictResult(null);
-                }}
-              />
-            )}
+      {activePanel === 'measure' && (
+        <MeasurePanel onClose={() => setActivePanel(null)} />
+      )}
+
+      {activePanel === 'info' && (
+        <InfoPanel
+          onClose={() => setActivePanel(null)}
+          totalAssets={assets.length}
+        />
+      )}
+
+      {selectedAsset && (
+        <GoogleEarthInfoCard
+          asset={selectedAsset}
+          clickedInfo={clickedInfo}
+          onClose={() => {
+            setSelectedAsset(null);
+            setClickedInfo(null);
+          }}
+          onFocusAsset={handleSelectAsset}
+        />
+      )}
+
+      {activePanel === 'conflict' && (
+        <div className="absolute left-18 top-20 z-40">
+          <ConflictDetectorPanel
+            onConflictChecked={(res) => setConflictResult(res)}
+            onZoomToConflict={handleFocusConflict}
+            onClose={() => {
+              setActivePanel(null);
+              setConflictResult(null);
+            }}
+          />
+        </div>
+      )}
+
+      {activePanel === 'register' && (
+        <RegisterAssetModal
+          onAssetRegistered={handleAssetRegistered}
+          onClose={() => {
+            setActivePanel(null);
+            setConflictResult(null);
+          }}
+          onViewConflictIn3D={(res, coords) => {
+            setConflictResult(res);
+            if (coords) handleFocusConflict(coords);
+          }}
+        />
+      )}
+
+      {activePanel === 'dashboard' && (
+        <div className="absolute inset-4 z-50 bg-white rounded-2xl shadow-2xl overflow-hidden flex flex-col border border-[rgba(0,0,0,0.1)]">
+          <div className="p-3 bg-[#f8f9fa] border-b border-[rgba(0,0,0,0.08)] flex justify-between items-center">
+            <span className="font-bold text-sm text-[#202124]">Cadastral Inventory & Spatial Assets Database</span>
+            <button
+              type="button"
+              onClick={() => setActivePanel(null)}
+              className="px-3 py-1 bg-[#e8eaed] hover:bg-[#dadce0] rounded-full text-xs font-medium cursor-pointer"
+            >
+              Close
+            </button>
           </div>
-        )}
+          <div className="flex-1 overflow-y-auto">
+            <DashboardView />
+          </div>
+        </div>
+      )}
 
-        {/* Full-View Cadastre Modules */}
-        {activeTab === 'dashboard' && <DashboardView />}
-        {activeTab === 'before_after' && <BeforeAfterView />}
-      </main>
+      {activePanel === 'benchmark' && (
+        <div className="absolute inset-4 z-50 bg-white rounded-2xl shadow-2xl overflow-hidden flex flex-col border border-[rgba(0,0,0,0.1)]">
+          <div className="p-3 bg-[#f8f9fa] border-b border-[rgba(0,0,0,0.08)] flex justify-between items-center">
+            <span className="font-bold text-sm text-[#202124]">2D vs 3D Cadastre Comparison Benchmark</span>
+            <button
+              type="button"
+              onClick={() => setActivePanel(null)}
+              className="px-3 py-1 bg-[#e8eaed] hover:bg-[#dadce0] rounded-full text-xs font-medium cursor-pointer"
+            >
+              Close
+            </button>
+          </div>
+          <div className="flex-1 overflow-y-auto">
+            <BeforeAfterView />
+          </div>
+        </div>
+      )}
+
+      <MapControls
+        onZoomIn={handleZoomIn}
+        onZoomOut={handleZoomOut}
+        compassHeading={compassHeading}
+        onResetNorth={handleResetNorth}
+        is3DMode={is3DMode}
+        onToggle2D3D={handleToggle2D3D}
+        onResetLocation={handleResetLocation}
+      />
+
+      <BottomStatusBar
+        latitude={cameraCoordinates.lat}
+        longitude={cameraCoordinates.lon}
+        groundElevation={18}
+        eyeAltitude={cameraCoordinates.alt}
+      />
     </div>
   );
 }

@@ -2,6 +2,7 @@ import React, { useState, useMemo, useEffect } from 'react';
 import * as THREE from 'three';
 import { Html, Line } from '@react-three/drei';
 import { localToLatLon } from '../../services/api';
+import { UTILITY_COLORS } from '../../constants/utilityColors';
 
 export function Pipeline3D({
   pipeline,
@@ -16,7 +17,6 @@ export function Pipeline3D({
   isMapActive = true
 }) {
   const [hovered, setHovered] = useState(false);
-  const [focused, setFocused] = useState(false);
 
   useEffect(() => {
     return () => {
@@ -26,9 +26,9 @@ export function Pipeline3D({
 
   const isSelected = selectedAsset && selectedAsset.ulpin === pipeline.ulpin;
   const isConflicted = Boolean(conflictInfo);
-  const showTag = isMapActive && (showPipeOverlay || undergroundView || isConflicted) && (hovered || focused);
+  const hasGlobalSelection = Boolean(selectedAsset);
+  const showTag = isMapActive && (showPipeOverlay || undergroundView || isConflicted) && hovered;
 
-  // Subsurface coordinates at true depth
   const p1 = useMemo(
     () => [pipeline.start_x || 0, pipeline.start_y !== undefined ? pipeline.start_y : -2, pipeline.start_z || 0],
     [pipeline.start_x, pipeline.start_y, pipeline.start_z]
@@ -44,52 +44,56 @@ export function Pipeline3D({
   const subsurfaceCurve = useMemo(() => new THREE.LineCurve3(v1, v2), [v1, v2]);
   const depthCenter = useMemo(() => new THREE.Vector3().addVectors(v1, v2).multiplyScalar(0.5), [v1, v2]);
 
-  // Color mapping based on utility infrastructure type
   const typeColors = {
-    water_pipe: '#0284C7',     // Cyan / Blue
-    electric_cable: '#D97706', // Amber / Copper
-    fiber_cable: '#7E22CE',    // Violet
-    other: '#10B981'           // Emerald
+    water_pipe: UTILITY_COLORS.water,
+    sewer_pipe: UTILITY_COLORS.sewer,
+    electric_cable: UTILITY_COLORS.electrical,
+    gas_pipe: UTILITY_COLORS.gas,
+    fiber_cable: UTILITY_COLORS.telecom
   };
 
-  const baseColor = typeColors[pipeline.asset_type] || '#0284C7';
-  const radius = pipeline.asset_type === 'water_pipe' ? 0.4 : pipeline.asset_type === 'electric_cable' ? 0.3 : 0.22;
+  const baseColor = typeColors[pipeline.asset_type] || UTILITY_COLORS.water;
+  const radius = pipeline.asset_type === 'water_pipe' ? 0.42 : pipeline.asset_type === 'electric_cable' ? 0.32 : 0.24;
 
   const activeColor = isConflicted
-    ? '#EF4444'
+    ? '#ea4335'
     : isNewGlow
-    ? '#38BDF8'
+    ? '#1a73e8'
     : isSelected
-    ? '#0284C7'
+    ? '#1a73e8'
     : hovered
-    ? '#38BDF8'
+    ? '#4285f4'
     : baseColor;
 
   const activeEmissive = isConflicted
-    ? '#DC2626'
+    ? '#ea4335'
     : isNewGlow
-    ? '#0284C7'
+    ? '#1a73e8'
     : isSelected
-    ? '#0284C7'
+    ? '#1a73e8'
     : hovered
-    ? '#0369A1'
+    ? '#1557b0'
     : '#000000';
 
   const activeEmissiveIntensity = isConflicted
     ? 0.75
     : isNewGlow
-    ? 0.6
+    ? 0.7
     : isSelected
-    ? 0.45
+    ? 0.55
     : hovered
-    ? 0.25
+    ? 0.3
     : 0.0;
 
-  // Selection & 3D Spatial Click Handling
+  const opacityLevel = isSelected
+    ? 1.0
+    : hasGlobalSelection
+    ? 0.22
+    : 0.95;
+
   const handleClick = (e) => {
     e.stopPropagation();
     const point = e.point;
-
     const realDepth = pipeline.depth !== undefined ? pipeline.depth : (pipeline.start_y || -2.0);
     const realY = point.y <= 0.25 ? realDepth : (point.y / verticalExaggeration);
     const { lat, lon } = localToLatLon(point.x, point.z);
@@ -99,12 +103,12 @@ export function Pipeline3D({
       y: Number(realY.toFixed(2)),
       z: Number(point.z.toFixed(2)),
       worldX: point.x,
-      worldY: realY * verticalExaggeration,
+      worldY: point.y,
       worldZ: point.z,
-      distance: 18,
+      distance: 20,
+      depth: realDepth,
       lat,
-      lon,
-      depth: Number(realY.toFixed(2))
+      lon
     };
 
     if (isConflicted && onSelectConflict) {
@@ -115,112 +119,78 @@ export function Pipeline3D({
         conflict_z: point.z
       });
     }
+
     onSelectAsset(pipeline, clickData);
   };
 
-  const handlePointerOver = (e) => {
-    e.stopPropagation();
-    setHovered(true);
-    document.body.style.cursor = 'pointer';
-  };
-
-  const handlePointerOut = (e) => {
-    e.stopPropagation();
-    setHovered(false);
-    document.body.style.cursor = 'auto';
-  };
-
-  const isVisible = undergroundView || showPipeOverlay || isSelected || isConflicted;
-  if (!isVisible) return null;
+  const groundSurfaceCurve = useMemo(() => {
+    const s1 = new THREE.Vector3(p1[0], 0.08, p1[2]);
+    const s2 = new THREE.Vector3(p2[0], 0.08, p2[2]);
+    return [s1, s2];
+  }, [p1, p2]);
 
   return (
     <group>
-      {/* Dashed screen-space overlay line at subterranean depth */}
-      <Line
-        points={[v1, v2]}
-        color={activeColor}
-        lineWidth={hovered || isSelected || isConflicted ? 4.0 : 2.5}
-        dashed={true}
-        dashScale={1.5}
-        dashSize={1.2}
-        gapSize={0.6}
-        depthTest={!showPipeOverlay && !isConflicted}
-        renderOrder={isConflicted ? 96 : 95}
-      />
-
-      {/* Subterranean 3D Volumetric Pipe Body */}
-      <mesh>
-        <tubeGeometry args={[subsurfaceCurve, 32, radius, 12, false]} />
+      <mesh
+        onPointerOver={(e) => {
+          e.stopPropagation();
+          setHovered(true);
+          document.body.style.cursor = 'pointer';
+        }}
+        onPointerOut={(e) => {
+          e.stopPropagation();
+          setHovered(false);
+          document.body.style.cursor = 'auto';
+        }}
+        onClick={handleClick}
+      >
+        <tubeGeometry args={[subsurfaceCurve, 32, isSelected ? radius * 1.3 : radius, 12, false]} />
         <meshStandardMaterial
           color={activeColor}
           emissive={activeEmissive}
           emissiveIntensity={activeEmissiveIntensity}
-          roughness={0.4}
-          metalness={0.5}
-          transparent={!undergroundView && (showPipeOverlay || isConflicted)}
-          opacity={!undergroundView && (showPipeOverlay || isConflicted) ? (isConflicted ? 0.75 : 0.4) : 1.0}
-          depthWrite={undergroundView}
+          roughness={0.3}
+          metalness={0.4}
+          transparent={hasGlobalSelection && !isSelected}
+          opacity={opacityLevel}
         />
       </mesh>
 
-      {/* Terminal Cap Spheres */}
-      <mesh position={v1}>
-        <sphereGeometry args={[radius * 1.15, 16, 16]} />
-        <meshStandardMaterial
+      {isSelected && (
+        <mesh>
+          <tubeGeometry args={[subsurfaceCurve, 32, radius * 1.7, 12, false]} />
+          <meshBasicMaterial color="#1a73e8" wireframe transparent opacity={0.3} />
+        </mesh>
+      )}
+
+      {showPipeOverlay && !undergroundView && (
+        <Line
+          points={groundSurfaceCurve}
           color={activeColor}
-          transparent={!undergroundView && (showPipeOverlay || isConflicted)}
-          opacity={!undergroundView && (showPipeOverlay || isConflicted) ? (isConflicted ? 0.75 : 0.4) : 1.0}
+          lineWidth={isSelected ? 4 : 2.5}
+          dashed
+          dashScale={2}
+          dashSize={1}
+          gapSize={0.5}
+          transparent
+          opacity={hasGlobalSelection && !isSelected ? 0.2 : 0.85}
         />
-      </mesh>
-      <mesh position={v2}>
-        <sphereGeometry args={[radius * 1.15, 16, 16]} />
-        <meshStandardMaterial
-          color={activeColor}
-          transparent={!undergroundView && (showPipeOverlay || isConflicted)}
-          opacity={!undergroundView && (showPipeOverlay || isConflicted) ? (isConflicted ? 0.75 : 0.4) : 1.0}
-        />
-      </mesh>
+      )}
 
-      {/* Interactive Hitbox */}
-      <mesh
-        tabIndex={0}
-        renderOrder={96}
-        onPointerOver={handlePointerOver}
-        onPointerOut={handlePointerOut}
-        onFocus={() => setFocused(true)}
-        onBlur={() => setFocused(false)}
-        onClick={handleClick}
-      >
-        <tubeGeometry args={[subsurfaceCurve, 24, 1.2, 8, false]} />
-        <meshBasicMaterial transparent opacity={0} depthWrite={false} />
-      </mesh>
-
-      {/* Hover / Focus Tag */}
       {showTag && (
         <Html
-          position={[depthCenter.x, depthCenter.y + 0.8, depthCenter.z]}
+          position={[depthCenter.x, depthCenter.y + 1.2, depthCenter.z]}
           center
           zIndexRange={[1, 5]}
           style={{ pointerEvents: 'none', userSelect: 'none' }}
         >
-          <div className={`px-3 py-2 rounded-lg bg-[#111417]/95 backdrop-blur-md text-xs whitespace-nowrap shadow-xl border ${
-            isConflicted ? 'border-rose-500/40 ring-1 ring-rose-500/30' : 'border-white/[0.12]'
-          } text-slate-200 pointer-events-none select-none space-y-1 transition-all duration-150 animate-in fade-in`}>
-            {isConflicted && (
-              <div className="text-[10px] font-bold text-rose-400 bg-rose-500/10 px-1.5 py-0.5 rounded border border-rose-500/20 flex items-center gap-1">
-                <span>⚠️ DETECTED CONFLICT:</span>
-                <span>{conflictInfo.status?.replace('_', ' ') || 'SAFETY BREACH'} ({conflictInfo.minimum_distance_m}m)</span>
-              </div>
-            )}
-            <div className="font-semibold text-slate-100 truncate flex items-center gap-1.5">
-              <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ backgroundColor: activeColor }}></span>
-              <span className="truncate">{pipeline.name}</span>
-            </div>
-            <div className="text-[10px] text-slate-400 font-mono flex items-center gap-1.5">
-              <span className="uppercase">{pipeline.asset_type?.replace('_', ' ')}</span>
-              <span>·</span>
-              <span className="text-amber-400 font-semibold">Depth: {pipeline.depth || pipeline.start_y || -2}m</span>
-            </div>
+          <div className="px-3 py-1.5 rounded-full bg-white text-[#202124] text-[11px] font-medium shadow-[0_2px_8px_rgba(60,64,67,0.3)] border border-[rgba(0,0,0,0.08)] flex items-center gap-2 whitespace-nowrap">
+            <span
+              className="w-2 h-2 rounded-full"
+              style={{ backgroundColor: activeColor }}
+            />
+            <span>{pipeline.name}</span>
+            <span className="text-[10px] text-[#5f6368] font-mono">({pipeline.ulpin})</span>
           </div>
         </Html>
       )}
